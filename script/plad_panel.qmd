@@ -1,0 +1,327 @@
+---
+title: "PLAD ADM-2 Panel — Construction Plan"
+subtitle: "Balanced ADM-2 × year panel, 2000–2022"
+author: "CERDI, Université Clermont-Auvergne"
+date: today
+format:
+  html:
+    self-contained: true
+    toc: true
+    toc-depth: 3
+    theme: cosmo
+    code-fold: true
+    df-print: kable
+execute:
+  warning: false
+  message: false
+knitr:
+  opts_knit:
+    root.dir: "../"
+---
+
+## Overview
+
+This document constructs a balanced ADM-2 × year panel for 2000–2022 matching political
+leaders' birthplaces and ethnicities (PLAD v7.0) to subnational administrative units
+(GADM 4.10).
+
+**Output:** `output/plad_adm2_panel.rds` — 48,010 ADM-2 units × 23 years = 1,104,230 rows
+
+| Variable | Definition |
+|----------|-----------|
+| `birthplace_match` | 1 if ADM-2 contains the current leader's birthplace in year *t* |
+| `ethnicity_match` | 1 if ADM-2 intersects the GeoEPR settlement area of the leader's ethnicity in year *t* |
+
+---
+
+## Setup
+
+```{r setup}
+library(sf)
+library(haven)
+library(tidyverse)
+library(countrycode)
+
+sf_use_s2(FALSE)  # GADM geometries are invalid under s2 spherical rules; planar GEOS is accurate enough for ADM-2 analysis
+
+stopifnot(
+  file.exists("source/gadm_410_adm2_clean.gpkg"),
+  file.exists("source/PLAD/PLAD_April_2024.dta"),
+  file.exists("source/GeoEPR/GeoEPR-2023.geojson")
+)
+```
+
+---
+
+## 1. Load Data
+
+### 1.1 GADM ADM-2 boundaries
+
+```{r load-gadm}
+gadm <- st_read("source/gadm_410_adm2_clean.gpkg", quiet = TRUE) |>
+  select(gid_2, name_adm2, name_adm1, iso3, country, geom)
+
+gadm_df <- st_drop_geometry(gadm)
+
+cat("GADM: ", nrow(gadm), "ADM-2 units across", n_distinct(gadm$iso3), "countries\n")
+```
+
+### 1.2 PLAD leaders
+
+```{r load-plad}
+plad_raw <- read_dta("source/PLAD/PLAD_April_2024.dta") |>
+  zap_labels() |>
+  select(gid_0, gid_2, startyear, endyear, latitude, longitude,
+         geo_precision, ethnicity_geoepr1) |>
+  mutate(
+    gid_0             = as.character(gid_0),
+    gid_2             = na_if(as.character(gid_2), "."),
+    startyear         = as.integer(startyear),
+    endyear           = as.integer(endyear),
+    latitude          = as.numeric(latitude),
+    longitude         = as.numeric(longitude),
+    geo_precision     = as.integer(geo_precision),
+    ethnicity_geoepr1 = na_if(as.character(ethnicity_geoepr1), "")
+  )
+
+cat("PLAD: ", nrow(plad_raw), "leaders\n")
+cat("Missing gid_2:", sum(is.na(plad_raw$gid_2)), "\n")
+cat("geo_precision distribution:\n")
+print(table(plad_raw$geo_precision, useNA = "always"))
+```
+
+### 1.3 GeoEPR ethnic settlement areas
+
+```{r load-geoepr}
+geoepr <- st_read("source/GeoEPR/GeoEPR-2023.geojson", quiet = TRUE) |>
+  select(group, gwid, from, to, geometry) |>
+  mutate(
+    iso3 = countrycode(as.integer(gwid), "gwn", "iso3c"),
+    from = as.integer(from),
+    to   = as.integer(to)
+  )
+
+cat("GeoEPR: ", nrow(geoepr), "group-period polygons,", n_distinct(geoepr$group), "unique groups\n")
+```
+
+---
+
+## 2. Expand PLAD to Leader × Year
+
+Each leader row spans `startyear`–`endyear`. This step creates one row per leader per
+calendar year, clipped to 2000–2022.
+
+```{r expand-plad}
+plad <- plad_raw |>
+  rename(iso3 = gid_0) |>
+  filter(!is.na(iso3), !is.na(startyear), !is.na(endyear),
+         startyear <= 2022L, endyear >= 2000L) |>
+  mutate(
+    yr_start = pmax(startyear, 2000L),
+    yr_end   = pmin(endyear,   2022L)
+  ) |>
+  rowwise() |>
+  mutate(year = list(seq(yr_start, yr_end))) |>
+  ungroup() |>
+  unnest(year) |>
+  select(-startyear, -endyear, -yr_start, -yr_end)
+
+# Guard: one effective leader per country-year
+dups <- count(plad, iso3, year) |> filter(n > 1)
+if (nrow(dups) > 0) {
+  warning(sprintf("%d iso3-year pairs have multiple leaders; keeping first.", nrow(dups)))
+  plad <- group_by(plad, iso3, year) |> slice(1) |> ungroup()
+}
+
+cat("Leader-year rows: ", nrow(plad), "\n")
+cat("Countries covered: ", n_distinct(plad$iso3), "\n")
+cat("Year range: ", range(plad$year), "\n")
+```
+
+---
+
+## 3. Panel Spine
+
+All 48,010 GADM ADM-2 units × 23 years (2000–2022) = 1,104,230 rows.
+Leader info is joined by `(iso3, year)`. ADM-2 units in non-PLAD countries receive `NA`.
+
+```{r spine}
+years <- 2000L:2022L
+
+spine <- crossing(
+  gadm_df |> select(gid_2, name_adm2, name_adm1, iso3, country),
+  year = years
+) |>
+  left_join(
+    plad |> select(iso3, year,
+                   gid_2_ldr = gid_2, latitude, longitude,
+                   geo_precision, ethnicity_geoepr1),
+    by = c("iso3", "year")
+  )
+
+cat("Spine rows: ", nrow(spine), "\n")
+cat("Rows with a matched leader: ", sum(!is.na(spine$gid_2_ldr) | !is.na(spine$ethnicity_geoepr1)), "\n")
+```
+
+---
+
+## 4. `birthplace_match`
+
+### Logic
+
+| Case | Condition | Result |
+|------|-----------|--------|
+| Primary | `gid_2` present in PLAD | Exact match: `gid_2 == gid_2_ldr` |
+| Fallback | `gid_2` missing + `geo_precision < 4` | `st_within(lat/lon point, ADM-2 polygon)` |
+| NA | `gid_2` missing + `geo_precision ≥ 4` | `NA` — location too coarse for ADM-2 |
+| No leader | Country not in PLAD | `NA` |
+
+```{r birthplace-primary}
+# Primary: exact gid_2 match
+spine <- spine |>
+  mutate(
+    birthplace_match = case_when(
+      !is.na(gid_2_ldr) ~ as.integer(gid_2 == gid_2_ldr),
+      TRUE               ~ NA_integer_
+    )
+  )
+```
+
+```{r birthplace-fallback}
+# Spatial fallback: missing gid_2 + geo_precision < 4
+fallback <- plad |>
+  filter(is.na(gid_2), !is.na(latitude), !is.na(longitude),
+         !is.na(geo_precision), geo_precision < 4L) |>
+  distinct(iso3, year, latitude, longitude)
+
+cat("Leader-years eligible for spatial fallback:", nrow(fallback), "\n")
+
+if (nrow(fallback) > 0) {
+  pts      <- st_as_sf(fallback, coords = c("longitude", "latitude"), crs = 4326)
+  within_i <- st_within(pts, gadm, sparse = TRUE)
+  fallback$gid_2_fallback <- vapply(
+    within_i,
+    function(i) if (length(i) == 0L) NA_character_ else gadm$gid_2[i[1L]],
+    character(1)
+  )
+
+  cat("Fallback resolved: ", sum(!is.na(fallback$gid_2_fallback)), "/", nrow(fallback), "\n")
+
+  spine <- spine |>
+    left_join(fallback |> select(iso3, year, gid_2_fallback), by = c("iso3", "year")) |>
+    mutate(
+      birthplace_match = case_when(
+        !is.na(birthplace_match) ~ birthplace_match,
+        !is.na(gid_2_fallback)   ~ as.integer(gid_2 == gid_2_fallback),
+        TRUE                     ~ NA_integer_
+      )
+    ) |>
+    select(-gid_2_fallback)
+}
+```
+
+```{r birthplace-summary}
+cat("birthplace_match distribution:\n")
+print(table(spine$birthplace_match, useNA = "always"))
+```
+
+---
+
+## 5. `ethnicity_match`
+
+For each (leader, year), find the GeoEPR polygon for `ethnicity_geoepr1` in that year,
+then mark all ADM-2 units that spatially intersect it.
+
+Country link: PLAD `iso3` (= `gid_0`) ↔ GeoEPR `iso3` (derived from `gwid` via `countrycode`).
+
+```{r ethnicity-match}
+gadm_by_iso3 <- split(gadm, gadm$iso3)
+
+eth_leaders <- plad |>
+  filter(!is.na(ethnicity_geoepr1)) |>
+  distinct(iso3, year, ethnicity_geoepr1)
+
+cat("Unique (iso3, year, ethnicity) combinations:", nrow(eth_leaders), "\n")
+
+eth_list <- vector("list", nrow(eth_leaders))
+
+for (k in seq_len(nrow(eth_leaders))) {
+  ldr      <- eth_leaders[k, ]
+  grp_geom <- geoepr |>
+    filter(iso3 == ldr$iso3,
+           group == ldr$ethnicity_geoepr1,
+           from <= ldr$year, to >= ldr$year)
+  gadm_cty <- gadm_by_iso3[[ldr$iso3]]
+
+  if (nrow(grp_geom) == 0L || is.null(gadm_cty) || nrow(gadm_cty) == 0L) next
+
+  hits <- st_intersects(gadm_cty, st_union(grp_geom), sparse = TRUE)
+  eth_list[[k]] <- tibble(
+    gid_2           = gadm_cty$gid_2,
+    year            = ldr$year,
+    ethnicity_match = as.integer(lengths(hits) > 0L)
+  )
+}
+
+eth_df <- bind_rows(eth_list)
+
+if (nrow(eth_df) > 0) {
+  eth_df <- eth_df |>
+    group_by(gid_2, year) |>
+    summarise(ethnicity_match = as.integer(any(ethnicity_match == 1L)), .groups = "drop")
+}
+
+n_unmatched <- sum(vapply(eth_list, is.null, logical(1)))
+cat("Leader-years with no GeoEPR match:", n_unmatched, "/", nrow(eth_leaders), "\n")
+cat("(Missing polygon or group name mismatch)\n")
+
+spine <- left_join(spine, eth_df, by = c("gid_2", "year"))
+
+cat("\nethnicity_match distribution:\n")
+print(table(spine$ethnicity_match, useNA = "always"))
+```
+
+---
+
+## 6. Assemble and Save
+
+```{r assemble}
+panel <- spine |>
+  select(gid_2, name_adm2, name_adm1, iso3, country, year,
+         birthplace_match, ethnicity_match) |>
+  arrange(iso3, gid_2, year)
+
+saveRDS(panel, "output/plad_adm2_panel.rds")
+
+cat("Saved: output/plad_adm2_panel.rds\n")
+cat("Dimensions:", nrow(panel), "x", ncol(panel), "\n")
+```
+
+---
+
+## 7. Verification
+
+```{r verify}
+stopifnot(file.exists("output/plad_adm2_panel.rds"))
+
+p <- readRDS("output/plad_adm2_panel.rds")
+
+# Dimension check
+cat("Expected: 1,104,230 rows. Actual:", nrow(p), "\n")
+cat("Expected: 8 columns. Actual:    ", ncol(p), "\n")
+stopifnot(nrow(p) == nrow(gadm_df) * length(years))
+
+# Variable ranges
+cat("\nbirthplace_match in {0, 1, NA}:",
+    all(p$birthplace_match %in% c(0L, 1L, NA_integer_)), "\n")
+cat("ethnicity_match  in {0, 1, NA}:",
+    all(p$ethnicity_match  %in% c(0L, 1L, NA_integer_)), "\n")
+
+# Plausibility: at least one birthplace match per leader-year
+n_bp_matches <- sum(p$birthplace_match == 1L, na.rm = TRUE)
+cat("\nTotal birthplace_match == 1 cells:", n_bp_matches, "\n")
+cat("Total ethnicity_match  == 1 cells:", sum(p$ethnicity_match == 1L, na.rm = TRUE), "\n")
+stopifnot(n_bp_matches > 0)
+
+cat("\nAll checks passed.\n")
+```

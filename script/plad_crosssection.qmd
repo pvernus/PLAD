@@ -1,0 +1,168 @@
+---
+title: "PLAD ADM-2 Cross-section — Construction Plan"
+subtitle: "Balanced ADM-2 cross-section, 2000–2022 summary"
+author: "CERDI, Université Clermont-Auvergne"
+date: today
+format:
+  html:
+    self-contained: true
+    toc: true
+    toc-depth: 3
+    theme: cosmo
+    code-fold: true
+    df-print: kable
+execute:
+  warning: false
+  message: false
+knitr:
+  opts_knit:
+    root.dir: "../"
+---
+
+## Overview
+
+This document collapses the balanced ADM-2 × year panel (`output/plad_adm2_panel.rds`)
+into a time-invariant cross-section summarising leader birthplace affiliation over 2000–2022.
+
+**Dependency:** requires `script/plad_panel.qmd` to have been rendered first.
+
+**Output:** `output/plad_adm2_crosssection.rds` — 48,010 rows (one per ADM-2 unit)
+
+| Variable | Definition |
+|----------|-----------|
+| `ever_birthplace` | 1 if ADM-2 was ever a leader's birthplace during 2000–2022 |
+| `always_birthplace` | 1 if ADM-2 was a leader's birthplace in every non-NA year of 2000–2022 |
+| `pct_birthplace` | Share of non-NA years in which ADM-2 was a leader's birthplace |
+
+---
+
+## Setup
+
+```{r setup}
+library(tidyverse)
+
+if (!file.exists("output/plad_adm2_panel.rds")) {
+  stop("Panel output not found. Render script/plad_panel.qmd first.")
+}
+```
+
+---
+
+## 1. Load Panel
+
+```{r load-panel}
+panel <- readRDS("output/plad_adm2_panel.rds")
+
+cat("Panel dimensions:", nrow(panel), "x", ncol(panel), "\n")
+cat("ADM-2 units:     ", n_distinct(panel$gid_2), "\n")
+cat("Years covered:   ", paste(range(panel$year), collapse = "–"), "\n")
+```
+
+---
+
+## 2. Collapse to ADM-2 Level
+
+Group by ADM-2 unit and compute the three birthplace summary variables.
+
+**NA handling:** if all 23 years have `birthplace_match = NA` (country not in PLAD),
+all three variables are set to `NA` rather than `0`/`1`.
+
+```{r crosssection}
+# Metadata: one row per gid_2 (take first occurrence to handle any inconsistency)
+gadm_meta <- panel |>
+  distinct(gid_2, name_adm2, name_adm1, iso3, country) |>
+  group_by(gid_2) |>
+  slice(1) |>
+  ungroup()
+
+# Aggregate birthplace variables by gid_2 only
+crosssection <- panel |>
+  group_by(gid_2) |>
+  summarise(
+    n_non_na          = sum(!is.na(birthplace_match)),
+    ever_birthplace   = if_else(
+      n_non_na == 0L,
+      NA_integer_,
+      as.integer(any(birthplace_match == 1L, na.rm = TRUE))
+    ),
+    always_birthplace = if_else(
+      n_non_na == 0L,
+      NA_integer_,
+      as.integer(all(birthplace_match == 1L, na.rm = TRUE))
+    ),
+    pct_birthplace    = if_else(
+      n_non_na == 0L,
+      NA_real_,
+      mean(birthplace_match, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  ) |>
+  select(-n_non_na) |>
+  left_join(gadm_meta, by = "gid_2") |>
+  select(gid_2, name_adm2, name_adm1, iso3, country,
+         ever_birthplace, always_birthplace, pct_birthplace)
+
+cat("Cross-section dimensions:", nrow(crosssection), "x", ncol(crosssection), "\n")
+```
+
+---
+
+## 3. Summary Statistics
+
+```{r summary}
+cat("ever_birthplace:\n")
+print(table(crosssection$ever_birthplace, useNA = "always"))
+
+cat("\nalways_birthplace:\n")
+print(table(crosssection$always_birthplace, useNA = "always"))
+
+cat("\npct_birthplace (non-NA units):\n")
+summary(crosssection$pct_birthplace[!is.na(crosssection$pct_birthplace)])
+```
+
+ADM-2 units with `ever_birthplace == 1`:
+
+```{r ever-table}
+crosssection |>
+  filter(ever_birthplace == 1L) |>
+  select(iso3, name_adm1, name_adm2, pct_birthplace) |>
+  arrange(iso3, desc(pct_birthplace))
+```
+
+---
+
+## 4. Save
+
+```{r save}
+saveRDS(crosssection, "output/plad_adm2_crosssection.rds")
+cat("Saved: output/plad_adm2_crosssection.rds\n")
+```
+
+---
+
+## 5. Verification
+
+```{r verify}
+stopifnot(file.exists("output/plad_adm2_crosssection.rds"))
+
+cs <- readRDS("output/plad_adm2_crosssection.rds")
+
+# Dimension check
+cat("Rows:   ", nrow(cs), "(unique gid_2:", n_distinct(cs$gid_2), ")\n")
+cat("Columns:", ncol(cs), "\n")
+stopifnot(n_distinct(cs$gid_2) == nrow(cs))  # one row per ADM-2 unit
+
+# Variable range checks
+cat("\never_birthplace   in {0, 1, NA}:",
+    all(cs$ever_birthplace   %in% c(0L, 1L, NA_integer_)), "\n")
+cat("always_birthplace in {0, 1, NA}:",
+    all(cs$always_birthplace %in% c(0L, 1L, NA_integer_)), "\n")
+cat("pct_birthplace    in [0, 1]:    ",
+    all(cs$pct_birthplace >= 0 & cs$pct_birthplace <= 1, na.rm = TRUE), "\n")
+
+# Consistency: always_birthplace <= ever_birthplace
+cat("always <= ever (non-NA):        ",
+    all(cs$always_birthplace <= cs$ever_birthplace, na.rm = TRUE), "\n")
+
+cat("\nAll checks passed.\n")
+```
