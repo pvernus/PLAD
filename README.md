@@ -19,14 +19,14 @@ Match political leaders' birthplaces and ethnicities (PLAD v7.0) to ADM-2 subnat
 
 ## Scripts
 
-### `script/panel.R` — Panel dataset (time-varying)
+### `script/plad_panel.qmd` — Panel dataset (time-varying)
 
 | Variable | Definition |
 |----------|------------|
 | `birthplace_match` | 1 if ADM-2 unit contains the current leader's birthplace in year t |
 | `ethnicity_match` | 1 if ADM-2 unit falls within the GeoEPR settlement of the current leader's ethnicity in year t |
 
-### `script/crosssection.R` — Cross-section dataset (time-invariant)
+### `script/plad_crosssection.qmd` — Cross-section dataset (time-invariant)
 
 | Variable | Definition |
 |----------|------------|
@@ -37,8 +37,8 @@ Match political leaders' birthplaces and ethnicities (PLAD v7.0) to ADM-2 subnat
 ## How to Run
 
 ```bash
-"C:/Program Files/R/R-4.5.2/bin/Rscript.exe" script/panel.R
-"C:/Program Files/R/R-4.5.2/bin/Rscript.exe" script/crosssection.R
+quarto render script/plad_panel.qmd
+quarto render script/plad_crosssection.qmd  # requires panel output
 ```
 
 ## Environment
