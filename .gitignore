@@ -1,0 +1,23 @@
+# === WHITELIST — only explicitly allowed files are tracked ===
+
+# Ignore everything at root level
+/*
+
+# Root files to track
+!.gitignore
+!README.md
+
+# script/ folder: track all files
+!script/
+!script/**
+
+# source/ folder: track sub-folder structure only (no data files — they are large)
+!source/
+/source/**
+!/source/**/
+!/source/**/.gitkeep
+
+# output/ folder: track root .gitkeep only, all contents ignored
+!output/
+/output/**
+!/output/.gitkeep
